@@ -98,16 +98,8 @@ class DefaultBuildOperationQueue<T extends BuildOperation> implements BuildOpera
 
     @Override
     public void waitForCompletion() throws MultipleBuildOperationFailures {
-        lock.lock();
-        try {
-            if (queueState == QueueState.Done) {
-                throw new IllegalStateException("Cannot wait for completion more than once.");
-            }
-            queueState = QueueState.Finishing;
-            workAvailable.signalAll();
-        } finally {
-            lock.unlock();
-        }
+        // Signal that there is no more work to be scheduled
+        markAsFinishing();
 
         // Use this thread to process any work - this allows work to be executed using the
         // worker lease acquired by this thread even if the executor thread pool is full of
@@ -119,6 +111,20 @@ class DefaultBuildOperationQueue<T extends BuildOperation> implements BuildOpera
             addFailure(t);
         }
 
+        // Wait for other threads to complete work. Release the project lock to allow any workers
+        // that might be waiting to access the project state to proceed
+        // In general we don't want to run work that requires access to the project state, and instead
+        // the scheduling thread (this thread) should unpack whatever state is required from the project
+        // and pass it to the work
+        workerLeases.withoutProjectLock(new Runnable() {
+            @Override
+            public void run() {
+                waitForPendingOperationsToComplete();
+            }
+        });
+    }
+
+    private void waitForPendingOperationsToComplete() {
         lock.lock();
         try {
             // Wait for any work still running in other threads
@@ -134,6 +140,19 @@ class DefaultBuildOperationQueue<T extends BuildOperation> implements BuildOpera
             if (!failures.isEmpty()) {
                 throw new MultipleBuildOperationFailures(getFailureMessage(failures), failures, logLocation);
             }
+        } finally {
+            lock.unlock();
+        }
+    }
+
+    private void markAsFinishing() {
+        lock.lock();
+        try {
+            if (queueState == QueueState.Done) {
+                throw new IllegalStateException("Cannot wait for completion more than once.");
+            }
+            queueState = QueueState.Finishing;
+            workAvailable.signalAll();
         } finally {
             lock.unlock();
         }

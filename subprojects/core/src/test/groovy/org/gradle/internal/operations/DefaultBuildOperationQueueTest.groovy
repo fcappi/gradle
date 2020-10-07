@@ -19,8 +19,10 @@ package org.gradle.internal.operations
 import org.gradle.api.GradleException
 import org.gradle.internal.concurrent.DefaultParallelismConfiguration
 import org.gradle.internal.resources.DefaultResourceLockCoordinationService
+import org.gradle.internal.resources.ResourceLock
 import org.gradle.internal.work.DefaultWorkerLeaseService
 import org.gradle.internal.work.WorkerLeaseService
+import org.gradle.util.Path
 import spock.lang.Specification
 import spock.lang.Unroll
 
@@ -138,6 +140,37 @@ class DefaultBuildOperationQueueTest extends Specification {
              [new Failure(), new Success(), new Failure()],
              [new Success(), new Failure(), new Failure()]],
             [1, 4, 10]].combinations()
+    }
+
+    class AccessesProject extends TestBuildOperation {
+        private final ResourceLock projectLock
+
+        AccessesProject(ResourceLock projectLock) {
+            this.projectLock = projectLock
+        }
+
+        @Override
+        void run(BuildOperationContext context) throws Exception {
+            workerRegistry.withLocks([projectLock]) {
+                // Don't need to do anything
+            }
+        }
+    }
+
+    def "operations can access project state"() {
+        given:
+        setupQueue(2)
+        def projectLock = workerRegistry.getProjectLock(Path.ROOT, Path.ROOT)
+
+        when:
+        workerRegistry.withLocks([projectLock]) {
+            operationQueue.add(new AccessesProject(projectLock))
+            operationQueue.add(new AccessesProject(projectLock))
+            operationQueue.waitForCompletion()
+        }
+
+        then:
+        noExceptionThrown()
     }
 
     def "when log location is set value is propagated in exceptions"() {
